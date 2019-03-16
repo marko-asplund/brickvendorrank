@@ -13,6 +13,7 @@ val specs2Version = "4.1.0"
 val logbackVersion = "1.2.3"
 
 libraryDependencies ++= Seq(
+  "org.rogach"          %% "scallop"              % "3.2.0",
   "org.http4s"          %% "http4s-dsl"           % http4sVersion,
   "org.http4s"          %% "http4s-blaze-client"  % http4sVersion,
   "org.http4s"          %% "http4s-circe"         % http4sVersion,
