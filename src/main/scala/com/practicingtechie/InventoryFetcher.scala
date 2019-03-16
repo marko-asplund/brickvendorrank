@@ -22,7 +22,7 @@ object InventoryFetcher {
   val PageSize = 500
   val MaxSellers = 50
   val InventoryOutputFilePrefix = "brick-inventory-"
-  val VendrsOutputFilePrefix = "brick-vendors-"
+  val VendorsOutputFilePrefix = "brick-vendors-"
   val OutputFileSuffix = ".tsv"
 
   case class ItemResponse(result: ItemResult)
@@ -84,9 +84,10 @@ object Searcher extends IOApp {
   import cats.effect._
   import fs2.Stream
   import org.http4s.client.blaze._
-
   import scala.concurrent.ExecutionContext.global
   import scala.io.Source
+  import scala.annotation.tailrec
+
 
   val logger = getLogger
 
@@ -95,10 +96,11 @@ object Searcher extends IOApp {
   def httpClient() =
     BlazeClientBuilder[IO](global).stream.map(org.http4s.client.middleware.Logger(true, false))
 
-  def writeRowsToFile(outputFilePrefix: String, rows: List[String]): Unit = {
+  def writeRowsToFile(outputFilePrefix: String, header: Option[String], rows: List[String]): Unit = {
     import java.io.File
     val outputFile = File.createTempFile(outputFilePrefix, OutputFileSuffix, new File("."))
     val pw = new java.io.PrintWriter(outputFile)
+    header.foreach(h => pw.write(s"$h\n"))
     pw.write(rows.mkString("\n"))
     pw.close
     logger.info(s"*** data written to file $outputFile ***")
@@ -108,7 +110,7 @@ object Searcher extends IOApp {
     Source.fromFile(fn).getLines.toList.map(_.split("\t").head)
 
   def readInventory(fn: String): List[(String, Set[String])] =
-    Source.fromFile(fn).getLines.toList.map { l =>
+    Source.fromFile(fn).getLines.toList.drop(1).map { l =>
       l.split("\t").toList match {
         case vendor :: parts :: Nil => vendor -> parts.replaceAll(" ", "").split(",").toSet
       }
@@ -118,7 +120,7 @@ object Searcher extends IOApp {
     val conf = new Conf(args)
     println(conf.summary)
 
-    case class InventoryEntry(vendor: String, availableParts: Set[String], missingParts: Set[String])
+    case class InventoryEntry(vendor: String, availableParts: Set[String], partsToBuy: Set[String])
 
     if (conf.fetchInventory()) {
       val codes = readPartCodes(conf.partCodesFile())
@@ -127,7 +129,7 @@ object Searcher extends IOApp {
         searcher = new InventoryFetcher[IO](hc)
         partsBySeller <- Stream.eval(searcher.sortSellers(codes))
         rows = partsBySeller.map{ case (seller, parts) => s"$seller\t${parts.mkString(", ")}" }
-        _ <- Stream.eval(IO(writeRowsToFile(InventoryOutputFilePrefix, rows)))
+        _ <- Stream.eval(IO(writeRowsToFile(InventoryOutputFilePrefix, Some("vendor\tavailable parts"), rows)))
       } yield partsBySeller).compile.drain.as(ExitCode.Success)
     } else {
       require(conf.inventoryFile.isSupplied, "inventory file must be supplied")
@@ -135,24 +137,27 @@ object Searcher extends IOApp {
       val inventory = readInventory(conf.inventoryFile())
 
       def findTopSellersForRequiredParts() = {
+        @tailrec
         def go(i: Int, missingParts: Set[String], acc: Seq[InventoryEntry]): Seq[InventoryEntry] = {
-          logger.debug(s"go: $i")
+          logger.debug(s"go: $i ${missingParts.size}")
           if (i < 10 && missingParts.size > 0) {
             val foundParts = inventory.map { case (_, availableParts) => availableParts.intersect(missingParts) }
-            //println(missesByVendor.map(_.size))
             val topIndex = inventory.zipWithIndex.
               map { case ((_, idx)) => idx -> foundParts(idx).size }.
-              sortBy(-_._2).
-              sorted.head._1
-            go(i + 1, foundParts(topIndex), acc :+
-              InventoryEntry(inventory(topIndex)._1, inventory(topIndex)._2, missingParts.diff(foundParts(topIndex))))
+              sortBy(-_._2).head._1
+            val newMissingParts = missingParts.diff(inventory(topIndex)._2)
+            println(s"missing: ==> $missingParts")
+            if (newMissingParts.size < missingParts.size)
+              go(i + 1, newMissingParts, acc :+
+                InventoryEntry(inventory(topIndex)._1, inventory(topIndex)._2, foundParts(topIndex)))
+            else acc
           } else acc
         }
         go(0, requiredParts, Seq.empty)
       }
       val sellers = findTopSellersForRequiredParts().toList
-      val rows = sellers.map(i => s"${i.vendor}\t${i.availableParts.mkString(",")}\t${i.missingParts.mkString(",")}")
-      writeRowsToFile(VendrsOutputFilePrefix, rows)
+      val rows = sellers.map(i => s"${i.vendor}\t${i.availableParts.mkString(",")}\t${i.partsToBuy.mkString(",")}")
+      writeRowsToFile(VendorsOutputFilePrefix, Some("vendor\tavailable parts\tparts to buy"), rows)
 
       ExitCode.Success.pure[IO]
     }
