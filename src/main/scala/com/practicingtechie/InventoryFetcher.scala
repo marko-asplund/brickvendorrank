@@ -156,13 +156,15 @@ object Searcher extends IOApp {
         go(0, requiredParts, Seq.empty)
       }
       val sellers = findTopSellersForRequiredParts().toList
-      val rows = sellers.map(i => s"${i.vendor}\t${i.availableParts.mkString(",")}\t${i.partsToBuy.mkString(",")}")
-      writeRowsToFile(VendorsOutputFilePrefix, Some("vendor\tavailable parts\tparts to buy"), rows)
+      val rows = sellers.map { i =>
+        def sortedList(s: Set[String]) = s.toList.sortBy(_.toInt).mkString(",")
+        val missing = requiredParts.diff(i.availableParts)
+        s"${i.vendor}\t${sortedList(i.availableParts)}\t${sortedList(missing)}\t${sortedList(i.partsToBuy)}"
+      }
+      writeRowsToFile(VendorsOutputFilePrefix, Some("vendor\tavailable parts\tmissing parts\tparts to buy"), rows)
 
       ExitCode.Success.pure[IO]
     }
   }
 
 }
-
-
