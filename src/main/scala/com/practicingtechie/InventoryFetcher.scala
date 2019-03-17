@@ -88,6 +88,8 @@ object Searcher extends IOApp {
   import scala.io.Source
   import scala.annotation.tailrec
 
+  case class InventoryEntry(vendor: String, availableParts: Set[String], partsToBuy: Set[String])
+  case class SellerResults(sellers: Seq[InventoryEntry], unavailableParts: Set[String])
 
   val logger = getLogger
 
@@ -113,14 +115,13 @@ object Searcher extends IOApp {
     Source.fromFile(fn).getLines.toList.drop(1).map { l =>
       l.split("\t").toList match {
         case vendor :: parts :: Nil => vendor -> parts.replaceAll(" ", "").split(",").toSet
+        case l => throw new Exception(s"invalid input data '$fn': $l")
       }
     }
 
   override def run(args: List[String]): IO[ExitCode] = {
     val conf = new Conf(args)
-    println(conf.summary)
-
-    case class InventoryEntry(vendor: String, availableParts: Set[String], partsToBuy: Set[String])
+    logger.info(conf.summary)
 
     if (conf.fetchInventory()) {
       val codes = readPartCodes(conf.partCodesFile())
@@ -138,30 +139,30 @@ object Searcher extends IOApp {
 
       def findTopSellersForRequiredParts() = {
         @tailrec
-        def go(i: Int, missingParts: Set[String], acc: Seq[InventoryEntry]): Seq[InventoryEntry] = {
-          logger.debug(s"go: $i ${missingParts.size}")
+        def go(i: Int, missingParts: Set[String], acc: SellerResults): SellerResults = {
           if (i < 10 && missingParts.size > 0) {
             val foundParts = inventory.map { case (_, availableParts) => availableParts.intersect(missingParts) }
             val topIndex = inventory.zipWithIndex.
               map { case ((_, idx)) => idx -> foundParts(idx).size }.
               sortBy(-_._2).head._1
             val newMissingParts = missingParts.diff(inventory(topIndex)._2)
-            println(s"missing: ==> $missingParts")
             if (newMissingParts.size < missingParts.size)
-              go(i + 1, newMissingParts, acc :+
-                InventoryEntry(inventory(topIndex)._1, inventory(topIndex)._2, foundParts(topIndex)))
-            else acc
-          } else acc
+              go(i + 1, newMissingParts, acc.copy(sellers =
+                acc.sellers :+ InventoryEntry(inventory(topIndex)._1, inventory(topIndex)._2, foundParts(topIndex))))
+            else acc.copy(unavailableParts = missingParts)
+          } else acc.copy(unavailableParts = missingParts)
         }
-        go(0, requiredParts, Seq.empty)
+        go(0, requiredParts, SellerResults(Seq.empty, Set.empty))
       }
-      val sellers = findTopSellersForRequiredParts().toList
-      val rows = sellers.map { i =>
+      val res = findTopSellersForRequiredParts()
+      val rows = res.sellers.toList.map { i =>
         def sortedList(s: Set[String]) = s.toList.sortBy(_.toInt).mkString(",")
         val missing = requiredParts.diff(i.availableParts)
         s"${i.vendor}\t${sortedList(i.availableParts)}\t${sortedList(missing)}\t${sortedList(i.partsToBuy)}"
       }
-      writeRowsToFile(VendorsOutputFilePrefix, Some("vendor\tavailable parts\tmissing parts\tparts to buy"), rows)
+      writeRowsToFile(VendorsOutputFilePrefix, Some("vendor\tavailable parts\tunavailable parts\tparts to buy"), rows)
+      if (res.unavailableParts.size > 0)
+        logger.warn(s"unavailable parts: ==> ${res.unavailableParts}")
 
       ExitCode.Success.pure[IO]
     }
